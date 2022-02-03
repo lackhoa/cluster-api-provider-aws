@@ -133,6 +133,32 @@ func (s *Service) CreateInstance(scope *scope.MachineScope, userData []byte) (*i
 	}.WithCloudProvider(s.scope.Name()).WithMachineName(scope.Machine))
 
 	var err error
+
+	descInstanceTypeInput := &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []*string{&input.Type},
+	}
+	describeInstanceTypeResult, err := ec2Svc.DescribeInstanceTypes(descInstanceTypeInput)
+	if err != nil {
+		s.scope.Error("cannot describe instance type", "instance type", input.Type)
+		return nil, err
+	}
+
+	supportedArchs == describeInstanceTypeResult.InstanceTypes[0].ProcessorInfo.SupportedArchitectures
+	logger := s.scope.WithValues("instance type", input.Type, "supported architectures", supportedArchs)
+	logger.Info("Obtained a list of supported architectures for instance type")
+	var imageArchitecture string
+	if len(supportedArchs) == 1 {
+		imageArchitecture = supportedArchs[0]
+	} else if len(supportedArchs) == 2 && contains(supportedArchs, "x86_64") && contains(supportedArchs, "i386") {
+		imageArchitecture = "x86_64"
+	} else {
+		err = fmt.Errorf("cannot choose preferred architeture for instance type %q", input.Type)
+		logger.Error(err, "cannot choose prefferred architecture")
+		return err
+	}
+
+	logger.Info("Chosen architecture.", "architecture", imageArchitecture)
+
 	// Pick image from the machine configuration, or use a default one.
 	if scope.AWSMachine.Spec.AMI.ID != nil { // nolint:nestif
 		input.ImageID = *scope.AWSMachine.Spec.AMI.ID
@@ -160,12 +186,12 @@ func (s *Service) CreateInstance(scope *scope.MachineScope, userData []byte) (*i
 		}
 
 		if scope.IsEKSManaged() && imageLookupFormat == "" && imageLookupOrg == "" && imageLookupBaseOS == "" {
-			input.ImageID, err = s.eksAMILookup(*scope.Machine.Spec.Version, scope.AWSMachine.Spec.AMI.EKSOptimizedLookupType)
+			input.ImageID, err = s.eksAMILookup(*scope.Machine.Spec.Version, imageArchitecture, scope.AWSMachine.Spec.AMI.EKSOptimizedLookupType)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			input.ImageID, err = s.defaultAMIIDLookup(imageLookupFormat, imageLookupOrg, imageLookupBaseOS, *scope.Machine.Spec.Version)
+			input.ImageID, err = s.defaultAMIIDLookup(imageLookupFormat, imageLookupOrg, imageLookupBaseOS, imageArchitecture, *scope.Machine.Spec.Version)
 			if err != nil {
 				return nil, err
 			}
@@ -872,7 +898,7 @@ func (s *Service) attachSecurityGroupsToNetworkInterface(groups []string, interf
 	copy(totalGroups, existingGroups)
 
 	for _, group := range groups {
-		if !containsGroup(existingGroups, group) {
+		if !contains(existingGroups, group) {
 			totalGroups = append(totalGroups, group)
 		}
 	}
@@ -949,13 +975,14 @@ func filterGroups(list []string, strToFilter string) (newList []string) {
 	return
 }
 
-// containsGroup returns true if a list contains a string.
-func containsGroup(list []string, strToSearch string) bool {
+// contains returns true if a list contains a string.
+func contains(list []string, strToSearch string) bool {
 	for _, item := range list {
 		if item == strToSearch {
 			return true
 		}
 	}
+
 	return false
 }
 
